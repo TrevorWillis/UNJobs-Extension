@@ -1,6 +1,11 @@
 // Background service worker: fetches and parses unjobs.org pages
 // to aggregate job listings across duty stations and pages.
 // Note: DOMParser is NOT available in service workers, so we use regex parsing.
+//
+// Grade info is NOT on listing pages — only on individual vacancy detail pages.
+// So we do a two-phase approach:
+//   Phase 1: Scrape all listing pages to collect job URLs/titles (fast)
+//   Phase 2: Fetch each vacancy page in parallel batches to extract grades
 
 const GRADE_PATTERNS = [
   { grade: 'P-1', patterns: [/\bP[\s-]?1\b/i] },
@@ -40,83 +45,121 @@ function detectGrades(text) {
   return found;
 }
 
-// Strip HTML tags to get plain text
 function stripHtml(html) {
   return html.replace(/<[^>]*>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Parse job listings from HTML using regex (no DOMParser in service workers)
+// ── Phase 1: Parse job listings from a duty station listing page ──
+
 function parseJobsFromHTML(html, dutyStationName) {
   const jobs = [];
-
-  // Each job is in a <div class="job"> ... </div> (may have nested divs for org wrapper)
-  // The structure on listing pages:
-  //   <div class="job">
-  //     <a class="jtitle" href="/vacancies/...">Title</a>
-  //     <br><span>snippet...</span>
-  //     <br><br><time ...>...</time><br><span>Closing date: ...</span>
-  //   </div>
-  // But the .job div is sometimes wrapped in an org div.
-
-  // Strategy: find all <a ... class="jtitle" ... href="..."> elements
-  // Attributes can appear in any order (style, class, href)
   const jtitleRegex = /<a\s[^>]*class="jtitle"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-  // Also match when href comes before class
   const jtitleRegex2 = /<a\s[^>]*href="([^"]*)"[^>]*class="jtitle"[^>]*>([\s\S]*?)<\/a>/gi;
-  // Collect all matches from both regex patterns
+
   const matches = [];
   let match;
   while ((match = jtitleRegex.exec(html)) !== null) {
-    matches.push({ href: match[1], titleHtml: match[2], index: match.index, length: match[0].length });
+    matches.push({ href: match[1], titleHtml: match[2], index: match.index });
   }
   while ((match = jtitleRegex2.exec(html)) !== null) {
-    // Avoid duplicates
     if (!matches.some(m => m.index === match.index)) {
-      matches.push({ href: match[1], titleHtml: match[2], index: match.index, length: match[0].length });
+      matches.push({ href: match[1], titleHtml: match[2], index: match.index });
     }
   }
 
   for (const m of matches) {
-    const href = m.href;
     const title = stripHtml(m.titleHtml);
-    const url = href.startsWith('http') ? href : 'https://unjobs.org' + href;
+    const url = m.href.startsWith('http') ? m.href : 'https://unjobs.org' + m.href;
 
-    // Get surrounding context for org, grade, closing date
-    const afterLink = html.substring(m.index, m.index + 3000);
-    const fullText = stripHtml(afterLink);
-
-    // Extract org from text before the link
-    const beforeLink = html.substring(Math.max(0, m.index - 500), m.index);
-    let org = '';
-    // Org text is usually right before the <a class="jtitle"> in the parent container
-    // Pattern: org name appears in text, often followed by "Updated:"
-    const orgMatch = beforeLink.match(/(?:class="job"[^>]*>)([^<]+)/);
-    if (orgMatch) {
-      org = orgMatch[1].trim();
-    }
+    // Try to detect grade from listing title/snippet (sometimes present)
+    const afterLink = html.substring(m.index, m.index + 2000);
+    const listingText = stripHtml(afterLink);
+    const listingGrades = detectGrades(title + ' ' + listingText);
 
     // Extract closing date
     const closingMatch = afterLink.match(/Closing date:\s*([^<]+)/);
     const closingDate = closingMatch ? 'Closing date: ' + closingMatch[1].trim() : '';
 
-    const grades = detectGrades(fullText);
+    // Extract org
+    const beforeLink = html.substring(Math.max(0, m.index - 500), m.index);
+    let org = '';
+    const orgMatch = beforeLink.match(/(?:class="job"[^>]*>)([^<]+)/);
+    if (orgMatch) org = orgMatch[1].trim();
 
     jobs.push({
       title,
       url,
       org,
-      grades,
+      grades: listingGrades, // May be empty — will be enriched in Phase 2
       closingDate,
       dutyStation: dutyStationName,
+      gradeChecked: listingGrades.length > 0, // Flag: did we already find grade?
     });
   }
 
   return jobs;
 }
 
-// Get total pages from HTML
+// ── Phase 2: Fetch individual vacancy pages to extract grades ──
+
+function extractGradeFromVacancyHTML(html) {
+  // Method 1: Structured "Grade:" field in the list-group
+  // Pattern: <li ...>Grade:...</li> containing <a href="/grades/p-4">P-4</a>
+  const gradeFieldMatch = html.match(/>\s*Grade:\s*<[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
+  if (gradeFieldMatch) {
+    return [gradeFieldMatch[1].trim()];
+  }
+
+  // Method 2: Detect from the vacancy title + first chunk of body text
+  // The title is in an <h2> or <h3> and the text follows
+  const titleMatch = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
+  const titleText = titleMatch ? stripHtml(titleMatch[1]) : '';
+
+  // Get the list-group metadata section
+  const listGroupMatch = html.match(/<ul[^>]*class="list-group"[^>]*>([\s\S]*?)<\/ul>/i);
+  const metaText = listGroupMatch ? stripHtml(listGroupMatch[1]) : '';
+
+  // Get first ~3000 chars of body text for grade detection
+  const bodyText = stripHtml(html.substring(0, 8000));
+
+  return detectGrades(titleText + ' ' + metaText + ' ' + bodyText);
+}
+
+async function fetchVacancyGrade(url) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    return extractGradeFromVacancyHTML(html);
+  } catch {
+    return [];
+  }
+}
+
+// Fetch grades for a batch of jobs concurrently
+async function enrichJobsWithGrades(jobs, concurrency, sendProgress) {
+  const needsCheck = jobs.filter(j => !j.gradeChecked);
+  const total = needsCheck.length;
+  let completed = 0;
+
+  for (let i = 0; i < needsCheck.length; i += concurrency) {
+    const batch = needsCheck.slice(i, i + concurrency);
+    const results = await Promise.all(
+      batch.map(job => fetchVacancyGrade(job.url))
+    );
+    for (let j = 0; j < batch.length; j++) {
+      batch[j].grades = results[j];
+      batch[j].gradeChecked = true;
+    }
+    completed += batch.length;
+    sendProgress(`Checking grades: ${completed}/${total} vacancies...`);
+  }
+}
+
+// ── Listing page helpers ──
+
 function getTotalFromHTML(html) {
   const match = html.match(/(\d+)\s*-\s*(\d+)\s*of\s*(\d+)/);
   if (match) {
@@ -127,14 +170,12 @@ function getTotalFromHTML(html) {
   return { total: 0, perPage: 25, pages: 0 };
 }
 
-// Fetch a single page
 async function fetchPage(url) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   return await resp.text();
 }
 
-// Fetch all jobs for a duty station
 async function fetchDutyStation(station, sendProgress) {
   const baseUrl = station.url;
   const jobs = [];
@@ -144,7 +185,7 @@ async function fetchDutyStation(station, sendProgress) {
   const firstPageJobs = parseJobsFromHTML(firstPageHtml, station.name);
   jobs.push(...firstPageJobs);
 
-  sendProgress(`${station.name}: page 1/${pages} (${total} total vacancies)`);
+  sendProgress(`${station.name}: listing page 1/${pages} (${total} vacancies)`);
 
   for (let page = 2; page <= pages; page++) {
     const url = `${baseUrl}/${page}`;
@@ -152,45 +193,28 @@ async function fetchDutyStation(station, sendProgress) {
       const html = await fetchPage(url);
       const pageJobs = parseJobsFromHTML(html, station.name);
       jobs.push(...pageJobs);
-      sendProgress(`${station.name}: page ${page}/${pages}`);
+      sendProgress(`${station.name}: listing page ${page}/${pages}`);
     } catch (err) {
       sendProgress(`${station.name}: error on page ${page} - ${err.message}`);
     }
-    // Small delay between requests
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 200));
   }
 
   return jobs;
 }
 
-// Handle messages from content script / popup
+// ── Message handling ──
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'fetchJobs') {
     handleFetchJobs(msg, sender);
     return false;
   }
   if (msg.type === 'fetchVacancyGrade') {
-    handleFetchVacancyGrade(msg).then(sendResponse);
+    fetchVacancyGrade(msg.url).then(grades => sendResponse({ grades }));
     return true;
   }
 });
-
-async function handleFetchVacancyGrade(msg) {
-  try {
-    const html = await fetchPage(msg.url);
-    // Look for structured grade field via regex
-    const gradeFieldMatch = html.match(/Grade:<\/[^>]+>\s*<[^>]*>\s*<a[^>]*>([^<]+)<\/a>/i);
-    if (gradeFieldMatch) {
-      return { grade: gradeFieldMatch[1].trim() };
-    }
-    // Fallback: detect from full page text
-    const plainText = stripHtml(html);
-    const grades = detectGrades(plainText);
-    return { grade: grades.length > 0 ? grades[0] : null };
-  } catch (err) {
-    return { grade: null, error: err.message };
-  }
-}
 
 async function handleFetchJobs(msg, sender) {
   let tabId = sender.tab ? sender.tab.id : null;
@@ -208,6 +232,8 @@ async function handleFetchJobs(msg, sender) {
     }
   }
 
+  // Phase 1: Collect all job listings
+  sendProgress('Phase 1: Collecting job listings...');
   let allJobs = [];
 
   for (const station of dutyStations) {
@@ -226,6 +252,12 @@ async function handleFetchJobs(msg, sender) {
     seen.add(job.url);
     return true;
   });
+
+  sendProgress(`Found ${allJobs.length} vacancies. Phase 2: Checking grades (this may take a moment)...`);
+
+  // Phase 2: Fetch individual vacancy pages for grade info
+  // Use concurrency of 5 to be respectful but still fast
+  await enrichJobsWithGrades(allJobs, 5, sendProgress);
 
   // Filter by selected grades if any
   let filtered = allJobs;
