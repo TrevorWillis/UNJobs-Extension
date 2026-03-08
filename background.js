@@ -1,10 +1,9 @@
 // Background service worker: fetches and parses unjobs.org pages
 // to aggregate job listings across duty stations and pages.
-// Note: DOMParser is NOT available in service workers, so we use regex parsing.
 //
 // Grade info is NOT on listing pages — only on individual vacancy detail pages.
-// So we do a two-phase approach:
-//   Phase 1: Scrape all listing pages to collect job URLs/titles (fast)
+// Two-phase approach:
+//   Phase 1: Scrape listing pages to collect job URLs/titles (fast)
 //   Phase 2: Fetch each vacancy page in parallel batches to extract grades
 
 const GRADE_PATTERNS = [
@@ -73,36 +72,22 @@ function parseJobsFromHTML(html, dutyStationName) {
     const title = stripHtml(m.titleHtml);
     const url = m.href.startsWith('http') ? m.href : 'https://unjobs.org' + m.href;
 
-    // Try to detect grade from listing title/snippet (sometimes present)
     const afterLink = html.substring(m.index, m.index + 2000);
-    const listingText = stripHtml(afterLink);
-    const listingGrades = detectGrades(title + ' ' + listingText);
-
-    // Extract closing date
     const closingMatch = afterLink.match(/Closing date:\s*([^<]+)/);
     const closingDate = closingMatch ? 'Closing date: ' + closingMatch[1].trim() : '';
 
-    // Extract org
     const beforeLink = html.substring(Math.max(0, m.index - 500), m.index);
     let org = '';
     const orgMatch = beforeLink.match(/(?:class="job"[^>]*>)([^<]+)/);
     if (orgMatch) org = orgMatch[1].trim();
 
-    jobs.push({
-      title,
-      url,
-      org,
-      grades: listingGrades, // May be empty — will be enriched in Phase 2
-      closingDate,
-      dutyStation: dutyStationName,
-      gradeChecked: listingGrades.length > 0, // Flag: did we already find grade?
-    });
+    jobs.push({ title, url, org, grades: [], closingDate, dutyStation: dutyStationName });
   }
 
   return jobs;
 }
 
-// ── Phase 2: Fetch individual vacancy pages to extract grades ──
+// ── Phase 2: Extract grade from a vacancy detail page ──
 
 function extractGradeFromVacancyHTML(html) {
   // Method 1: Structured "Grade:" field — find "Grade:" then the first <a> within 200 chars
@@ -121,37 +106,6 @@ function extractGradeFromVacancyHTML(html) {
   const bodyText = stripHtml(html.substring(0, 8000));
 
   return detectGrades(titleText + ' ' + bodyText);
-}
-
-async function fetchVacancyGrade(url) {
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return [];
-    const html = await resp.text();
-    return extractGradeFromVacancyHTML(html);
-  } catch {
-    return [];
-  }
-}
-
-// Fetch grades for a batch of jobs concurrently
-async function enrichJobsWithGrades(jobs, concurrency, sendProgress) {
-  const needsCheck = jobs.filter(j => !j.gradeChecked);
-  const total = needsCheck.length;
-  let completed = 0;
-
-  for (let i = 0; i < needsCheck.length; i += concurrency) {
-    const batch = needsCheck.slice(i, i + concurrency);
-    const results = await Promise.all(
-      batch.map(job => fetchVacancyGrade(job.url))
-    );
-    for (let j = 0; j < batch.length; j++) {
-      batch[j].grades = results[j];
-      batch[j].gradeChecked = true;
-    }
-    completed += batch.length;
-    sendProgress(`Checking grades: ${completed}/${total} vacancies...`);
-  }
 }
 
 // ── Listing page helpers ──
@@ -206,10 +160,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleFetchJobs(msg, sender);
     return false;
   }
-  if (msg.type === 'fetchVacancyGrade') {
-    fetchVacancyGrade(msg.url).then(grades => sendResponse({ grades }));
-    return true;
-  }
 });
 
 async function handleFetchJobs(msg, sender) {
@@ -249,13 +199,40 @@ async function handleFetchJobs(msg, sender) {
     return true;
   });
 
-  sendProgress(`Found ${allJobs.length} vacancies. Phase 2: Checking grades (this may take a moment)...`);
+  sendProgress(`Found ${allJobs.length} vacancies. Phase 2: Checking grades...`);
 
-  // Phase 2: Fetch individual vacancy pages for grade info
-  // Use concurrency of 5 to be respectful but still fast
-  await enrichJobsWithGrades(allJobs, 5, sendProgress);
+  // Phase 2: Fetch each vacancy page to get grade (5 concurrent)
+  const concurrency = 5;
+  let completed = 0;
+  let gradeErrors = 0;
 
-  // Filter by selected grades if any
+  for (let i = 0; i < allJobs.length; i += concurrency) {
+    const batch = allJobs.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map(async (job) => {
+        try {
+          const resp = await fetch(job.url);
+          if (!resp.ok) {
+            gradeErrors++;
+            return [];
+          }
+          const html = await resp.text();
+          return extractGradeFromVacancyHTML(html);
+        } catch (e) {
+          gradeErrors++;
+          return [];
+        }
+      })
+    );
+    for (let j = 0; j < batch.length; j++) {
+      const result = results[j];
+      batch[j].grades = result.status === 'fulfilled' ? result.value : [];
+    }
+    completed += batch.length;
+    sendProgress(`Checking grades: ${completed}/${allJobs.length} vacancies (${gradeErrors} errors)...`);
+  }
+
+  // Filter by selected grades
   let filtered = allJobs;
   if (selectedGrades && selectedGrades.length > 0) {
     filtered = allJobs.filter(job =>
@@ -270,6 +247,8 @@ async function handleFetchJobs(msg, sender) {
     if (!b.closingDate) return -1;
     return a.closingDate.localeCompare(b.closingDate);
   });
+
+  sendProgress(`Done! ${filtered.length} of ${allJobs.length} match your grade filter.`);
 
   if (tabId) {
     chrome.tabs.sendMessage(tabId, {
