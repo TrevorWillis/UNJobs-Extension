@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 380px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #f8f9fa;
+    }
+    .header {
+      background: #4b92db;
+      color: white;
+      padding: 12px 16px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #e0e0e0;
+      background: white;
+    }
+    .section-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #555;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .grade-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+      gap: 4px;
+    }
+    .grade-btn {
+      padding: 4px 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: white;
+      cursor: pointer;
+      font-size: 12px;
+      text-align: center;
+      transition: all 0.15s;
+    }
+    .grade-btn:hover { border-color: #4b92db; }
+    .grade-btn.active {
+      background: #4b92db;
+      color: white;
+      border-color: #4b92db;
+    }
+    .grade-category {
+      font-size: 11px;
+      color: #888;
+      margin: 6px 0 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .duty-station-list {
+      max-height: 180px;
+      overflow-y: auto;
+      margin-top: 4px;
+    }
+    .duty-station-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .duty-station-item:last-child { border-bottom: none; }
+    .duty-station-name { flex: 1; }
+    .remove-btn {
+      background: none;
+      border: none;
+      color: #cc4444;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    .remove-btn:hover { color: #ff0000; }
+    .add-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .add-row input {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .add-row button {
+      padding: 6px 12px;
+      background: #4b92db;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .add-row button:hover { background: #3a7bc8; }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: white;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .toggle-label { font-size: 13px; }
+    .toggle-switch {
+      position: relative;
+      width: 40px;
+      height: 22px;
+    }
+    .toggle-switch input { display: none; }
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: #ccc;
+      border-radius: 22px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .toggle-slider:before {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      bottom: 3px;
+      background: white;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider { background: #4b92db; }
+    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); }
+    .select-links {
+      font-size: 11px;
+    }
+    .select-links a {
+      color: #4b92db;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .select-links a:hover { text-decoration: underline; }
+    .empty-msg {
+      color: #999;
+      font-style: italic;
+      font-size: 12px;
+      padding: 8px 0;
+    }
+    .hint {
+      font-size: 11px;
+      color: #999;
+      margin-top: 4px;
+    }
+    .filter-mode {
+      display: flex;
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .filter-mode button {
+      flex: 1;
+      padding: 4px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: white;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .filter-mode button.active {
+      background: #4b92db;
+      color: white;
+      border-color: #4b92db;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">UNJobs Enhanced Filter</div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Enable filtering</span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="enableToggle" checked>
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
+
+  <div class="section">
+    <div class="section-title">
+      <span>Grade Filter</span>
+      <span class="select-links">
+        <a id="selectAllGrades">All</a> | <a id="selectNoGrades">None</a>
+      </span>
+    </div>
+    <div class="filter-mode">
+      <button id="modeHighlight" class="active" title="Highlight matching jobs">Highlight</button>
+      <button id="modeFilter" title="Hide non-matching jobs">Hide Others</button>
+    </div>
+    <div class="grade-category">Professional & Higher</div>
+    <div class="grade-grid" id="professionalGrades"></div>
+    <div class="grade-category">General Service</div>
+    <div class="grade-grid" id="gsGrades"></div>
+    <div class="grade-category">National Officer</div>
+    <div class="grade-grid" id="noGrades"></div>
+    <div class="grade-category">Other</div>
+    <div class="grade-grid" id="otherGrades"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Saved Duty Stations</div>
+    <div class="duty-station-list" id="dutyStationList">
+      <div class="empty-msg">No duty stations saved yet.</div>
+    </div>
+    <div class="add-row">
+      <input type="text" id="dutyStationInput" placeholder="e.g. Bangkok, Thailand">
+      <button id="addDutyStation">Add</button>
+    </div>
+    <div class="hint">Tip: You can also right-click a duty station link on unjobs.org to save it.</div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
