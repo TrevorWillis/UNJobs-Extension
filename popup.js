@@ -172,7 +172,6 @@ async function init() {
   // Search button - sends message to content script to trigger search
   document.getElementById('searchBtn').addEventListener('click', async () => {
     const s = await loadSettings();
-    // Send to the active unjobs tab
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       if (tabs[0] && tabs[0].url && tabs[0].url.includes('unjobs.org')) {
         chrome.runtime.sendMessage({
@@ -182,9 +181,7 @@ async function init() {
         });
         window.close();
       } else {
-        // Open unjobs.org first, then search
         chrome.tabs.create({ url: 'https://unjobs.org' }, (tab) => {
-          // Wait a bit for the content script to load, then trigger
           setTimeout(() => {
             chrome.runtime.sendMessage({
               type: 'fetchJobs',
@@ -196,6 +193,26 @@ async function init() {
         });
       }
     });
+  });
+
+  // Cache stats
+  updateCacheInfo();
+
+  document.getElementById('clearCache').addEventListener('click', async () => {
+    chrome.runtime.sendMessage({ type: 'clearCache' }, () => {
+      updateCacheInfo();
+    });
+  });
+}
+
+function updateCacheInfo() {
+  chrome.runtime.sendMessage({ type: 'getCacheStats' }, (resp) => {
+    const el = document.getElementById('cacheInfo');
+    if (resp && resp.count > 0) {
+      el.textContent = `Cache: ${resp.count} vacancies stored`;
+    } else {
+      el.textContent = 'Cache: empty';
+    }
   });
 }
 

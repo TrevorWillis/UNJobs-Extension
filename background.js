@@ -5,6 +5,10 @@
 // Two-phase approach:
 //   Phase 1: Scrape listing pages to collect job URLs/titles (fast)
 //   Phase 2: Fetch each vacancy page in parallel batches to extract grades
+//            (with a 3-month cache to speed up subsequent searches)
+
+const CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 3 months
+const CACHE_KEY = 'gradeCache';
 
 const GRADE_PATTERNS = [
   { grade: 'P-1', patterns: [/\bP[\s-]?1\b/i] },
@@ -50,6 +54,34 @@ function stripHtml(html) {
     .replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// ── Grade cache ──
+
+async function loadCache() {
+  return new Promise(resolve => {
+    chrome.storage.local.get({ [CACHE_KEY]: {} }, result => {
+      resolve(result[CACHE_KEY] || {});
+    });
+  });
+}
+
+async function saveCache(cache) {
+  return new Promise(resolve => {
+    chrome.storage.local.set({ [CACHE_KEY]: cache }, resolve);
+  });
+}
+
+// Prune entries older than TTL
+function pruneCache(cache) {
+  const now = Date.now();
+  const pruned = {};
+  for (const [url, entry] of Object.entries(cache)) {
+    if (now - entry.ts < CACHE_TTL_MS) {
+      pruned[url] = entry;
+    }
+  }
+  return pruned;
+}
+
 // ── Phase 1: Parse job listings from a duty station listing page ──
 
 function parseJobsFromHTML(html, dutyStationName) {
@@ -90,7 +122,6 @@ function parseJobsFromHTML(html, dutyStationName) {
 // ── Phase 2: Extract grade from a vacancy detail page ──
 
 function extractGradeFromVacancyHTML(html) {
-  // Method 1: Structured "Grade:" field — find "Grade:" then the first <a> within 200 chars
   const gradeIdx = html.indexOf('Grade:');
   if (gradeIdx >= 0) {
     const nearbyHtml = html.substring(gradeIdx, gradeIdx + 200);
@@ -100,7 +131,6 @@ function extractGradeFromVacancyHTML(html) {
     }
   }
 
-  // Method 2: Detect grade patterns from the page title and body text
   const titleMatch = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
   const titleText = titleMatch ? stripHtml(titleMatch[1]) : '';
   const bodyText = stripHtml(html.substring(0, 8000));
@@ -160,6 +190,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleFetchJobs(msg, sender);
     return false;
   }
+  if (msg.type === 'clearCache') {
+    saveCache({}).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.type === 'getCacheStats') {
+    loadCache().then(cache => {
+      const count = Object.keys(cache).length;
+      sendResponse({ count });
+    });
+    return true;
+  }
 });
 
 async function handleFetchJobs(msg, sender) {
@@ -177,6 +218,9 @@ async function handleFetchJobs(msg, sender) {
       chrome.tabs.sendMessage(tabId, { type: 'fetchProgress', text }).catch(() => {});
     }
   }
+
+  // Load and prune cache
+  let cache = pruneCache(await loadCache());
 
   // Phase 1: Collect all job listings
   sendProgress('Phase 1: Collecting job listings...');
@@ -199,15 +243,28 @@ async function handleFetchJobs(msg, sender) {
     return true;
   });
 
-  sendProgress(`Found ${allJobs.length} vacancies. Phase 2: Checking grades...`);
+  // Separate cached vs uncached jobs
+  const uncached = [];
+  let cacheHits = 0;
+  for (const job of allJobs) {
+    const cached = cache[job.url];
+    if (cached) {
+      job.grades = cached.grades;
+      cacheHits++;
+    } else {
+      uncached.push(job);
+    }
+  }
 
-  // Phase 2: Fetch each vacancy page to get grade (5 concurrent)
+  sendProgress(`Found ${allJobs.length} vacancies (${cacheHits} cached). Checking ${uncached.length} new...`);
+
+  // Phase 2: Fetch only uncached vacancy pages
   const concurrency = 5;
   let completed = 0;
   let gradeErrors = 0;
 
-  for (let i = 0; i < allJobs.length; i += concurrency) {
-    const batch = allJobs.slice(i, i + concurrency);
+  for (let i = 0; i < uncached.length; i += concurrency) {
+    const batch = uncached.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       batch.map(async (job) => {
         try {
@@ -226,11 +283,17 @@ async function handleFetchJobs(msg, sender) {
     );
     for (let j = 0; j < batch.length; j++) {
       const result = results[j];
-      batch[j].grades = result.status === 'fulfilled' ? result.value : [];
+      const grades = result.status === 'fulfilled' ? result.value : [];
+      batch[j].grades = grades;
+      // Store in cache
+      cache[batch[j].url] = { grades, ts: Date.now() };
     }
     completed += batch.length;
-    sendProgress(`Checking grades: ${completed}/${allJobs.length} vacancies (${gradeErrors} errors)...`);
+    sendProgress(`Checking grades: ${completed}/${uncached.length} new vacancies (${gradeErrors} errors)...`);
   }
+
+  // Save updated cache
+  await saveCache(cache);
 
   // Filter by selected grades
   let filtered = allJobs;
@@ -248,7 +311,7 @@ async function handleFetchJobs(msg, sender) {
     return a.closingDate.localeCompare(b.closingDate);
   });
 
-  sendProgress(`Done! ${filtered.length} of ${allJobs.length} match your grade filter.`);
+  sendProgress(`Done! ${filtered.length} of ${allJobs.length} match (${cacheHits} from cache).`);
 
   if (tabId) {
     chrome.tabs.sendMessage(tabId, {
