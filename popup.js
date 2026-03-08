@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS = {
   enabled: true,
   filterMode: 'highlight',
   selectedGrades: [],
-  dutyStations: []
+  dutyStations: []  // [{name, url}]
 };
 
 function loadSettings() {
@@ -49,6 +49,7 @@ function createGradeButton(grade, isActive) {
       settings.selectedGrades = settings.selectedGrades.filter(g => g !== grade);
     }
     await saveSettings({ selectedGrades: settings.selectedGrades });
+    updateSearchButton(settings);
     notifyContentScript();
   });
   return btn;
@@ -61,7 +62,6 @@ function renderGrades(selectedGrades) {
     no: document.getElementById('noGrades'),
     other: document.getElementById('otherGrades')
   };
-
   for (const [category, grades] of Object.entries(GRADES)) {
     const container = containers[category];
     container.innerHTML = '';
@@ -91,9 +91,10 @@ function renderDutyStations(dutyStations) {
     removeBtn.textContent = '\u00d7';
     removeBtn.addEventListener('click', async () => {
       const settings = await loadSettings();
-      settings.dutyStations = settings.dutyStations.filter(s => s.name !== station.name);
+      settings.dutyStations = settings.dutyStations.filter(s => s.url !== station.url);
       await saveSettings({ dutyStations: settings.dutyStations });
       renderDutyStations(settings.dutyStations);
+      updateSearchButton(settings);
       notifyContentScript();
     });
 
@@ -103,16 +104,27 @@ function renderDutyStations(dutyStations) {
   }
 }
 
+function updateSearchButton(settings) {
+  const btn = document.getElementById('searchBtn');
+  const summary = document.getElementById('searchSummary');
+  const hasDutyStations = settings.dutyStations.length > 0;
+
+  btn.disabled = !hasDutyStations;
+
+  const parts = [];
+  if (settings.dutyStations.length > 0) {
+    parts.push(`${settings.dutyStations.length} station${settings.dutyStations.length > 1 ? 's' : ''}`);
+  }
+  if (settings.selectedGrades.length > 0) {
+    parts.push(`grades: ${settings.selectedGrades.join(', ')}`);
+  } else {
+    parts.push('all grades');
+  }
+  summary.textContent = hasDutyStations ? `Will search: ${parts.join(' | ')}` : 'Add duty stations to enable search';
+}
+
 async function init() {
   const settings = await loadSettings();
-
-  // Enable toggle
-  const toggle = document.getElementById('enableToggle');
-  toggle.checked = settings.enabled;
-  toggle.addEventListener('change', async () => {
-    await saveSettings({ enabled: toggle.checked });
-    notifyContentScript();
-  });
 
   // Filter mode
   const highlightBtn = document.getElementById('modeHighlight');
@@ -138,43 +150,61 @@ async function init() {
   // Grade buttons
   renderGrades(settings.selectedGrades);
 
-  // Select all / none
   document.getElementById('selectAllGrades').addEventListener('click', async () => {
     await saveSettings({ selectedGrades: [...ALL_GRADES] });
     renderGrades(ALL_GRADES);
+    const s = await loadSettings();
+    updateSearchButton(s);
     notifyContentScript();
   });
   document.getElementById('selectNoGrades').addEventListener('click', async () => {
     await saveSettings({ selectedGrades: [] });
     renderGrades([]);
+    const s = await loadSettings();
+    updateSearchButton(s);
     notifyContentScript();
   });
 
   // Duty stations
   renderDutyStations(settings.dutyStations);
+  updateSearchButton(settings);
 
-  const input = document.getElementById('dutyStationInput');
-  const addBtn = document.getElementById('addDutyStation');
-
-  async function addDutyStation() {
-    const name = input.value.trim();
-    if (!name) return;
+  // Search button - sends message to content script to trigger search
+  document.getElementById('searchBtn').addEventListener('click', async () => {
     const s = await loadSettings();
-    if (s.dutyStations.some(d => d.name.toLowerCase() === name.toLowerCase())) {
-      input.value = '';
-      return;
-    }
-    s.dutyStations.push({ name });
-    await saveSettings({ dutyStations: s.dutyStations });
-    renderDutyStations(s.dutyStations);
-    input.value = '';
-    notifyContentScript();
-  }
-
-  addBtn.addEventListener('click', addDutyStation);
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') addDutyStation();
+    // Send to the active unjobs tab
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      if (tabs[0] && tabs[0].url && tabs[0].url.includes('unjobs.org')) {
+        chrome.runtime.sendMessage({
+          type: 'fetchJobs',
+          dutyStations: s.dutyStations,
+          selectedGrades: s.selectedGrades
+        });
+        window.close();
+      } else {
+        // Open unjobs.org first, then search
+        chrome.tabs.create({ url: 'https://unjobs.org' }, (tab) => {
+          // Wait a bit for the content script to load, then trigger
+          setTimeout(() => {
+            chrome.runtime.sendMessage({
+              type: 'fetchJobs',
+              dutyStations: s.dutyStations,
+              selectedGrades: s.selectedGrades
+            });
+          }, 2000);
+          window.close();
+        });
+      }
+    });
   });
 }
+
+// Listen for storage changes to update the UI if stations are added from the page
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.dutyStations) {
+    renderDutyStations(changes.dutyStations.newValue || []);
+    loadSettings().then(updateSearchButton);
+  }
+});
 
 init();

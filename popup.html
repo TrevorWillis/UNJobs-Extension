@@ -73,7 +73,10 @@
       border-bottom: 1px solid #f0f0f0;
     }
     .duty-station-item:last-child { border-bottom: none; }
-    .duty-station-name { flex: 1; }
+    .duty-station-name {
+      flex: 1;
+      font-size: 12px;
+    }
     .remove-btn {
       background: none;
       border: none;
@@ -84,67 +87,7 @@
       line-height: 1;
     }
     .remove-btn:hover { color: #ff0000; }
-    .add-row {
-      display: flex;
-      gap: 6px;
-      margin-top: 8px;
-    }
-    .add-row input {
-      flex: 1;
-      padding: 6px 8px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    .add-row button {
-      padding: 6px 12px;
-      background: #4b92db;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-    }
-    .add-row button:hover { background: #3a7bc8; }
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 16px;
-      background: white;
-      border-bottom: 1px solid #e0e0e0;
-    }
-    .toggle-label { font-size: 13px; }
-    .toggle-switch {
-      position: relative;
-      width: 40px;
-      height: 22px;
-    }
-    .toggle-switch input { display: none; }
-    .toggle-slider {
-      position: absolute;
-      inset: 0;
-      background: #ccc;
-      border-radius: 22px;
-      cursor: pointer;
-      transition: 0.2s;
-    }
-    .toggle-slider:before {
-      content: '';
-      position: absolute;
-      width: 16px;
-      height: 16px;
-      left: 3px;
-      bottom: 3px;
-      background: white;
-      border-radius: 50%;
-      transition: 0.2s;
-    }
-    .toggle-switch input:checked + .toggle-slider { background: #4b92db; }
-    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); }
-    .select-links {
-      font-size: 11px;
-    }
+    .select-links { font-size: 11px; }
     .select-links a {
       color: #4b92db;
       cursor: pointer;
@@ -160,12 +103,14 @@
     .hint {
       font-size: 11px;
       color: #999;
-      margin-top: 4px;
+      margin-top: 6px;
+      line-height: 1.4;
     }
     .filter-mode {
       display: flex;
       gap: 4px;
       margin-top: 6px;
+      margin-bottom: 6px;
     }
     .filter-mode button {
       flex: 1;
@@ -181,18 +126,33 @@
       color: white;
       border-color: #4b92db;
     }
+    .search-btn {
+      width: 100%;
+      padding: 10px;
+      background: #4b92db;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    .search-btn:hover { background: #3a7bc8; }
+    .search-btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .search-summary {
+      font-size: 11px;
+      color: #666;
+      text-align: center;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
   <div class="header">UNJobs Enhanced Filter</div>
-
-  <div class="toggle-row">
-    <span class="toggle-label">Enable filtering</span>
-    <label class="toggle-switch">
-      <input type="checkbox" id="enableToggle" checked>
-      <span class="toggle-slider"></span>
-    </label>
-  </div>
 
   <div class="section">
     <div class="section-title">
@@ -202,8 +162,8 @@
       </span>
     </div>
     <div class="filter-mode">
-      <button id="modeHighlight" class="active" title="Highlight matching jobs">Highlight</button>
-      <button id="modeFilter" title="Hide non-matching jobs">Hide Others</button>
+      <button id="modeHighlight" class="active" title="Highlight matching jobs on current page">Highlight</button>
+      <button id="modeFilter" title="Hide non-matching jobs on current page">Hide Others</button>
     </div>
     <div class="grade-category">Professional & Higher</div>
     <div class="grade-grid" id="professionalGrades"></div>
@@ -220,11 +180,12 @@
     <div class="duty-station-list" id="dutyStationList">
       <div class="empty-msg">No duty stations saved yet.</div>
     </div>
-    <div class="add-row">
-      <input type="text" id="dutyStationInput" placeholder="e.g. Bangkok, Thailand">
-      <button id="addDutyStation">Add</button>
-    </div>
-    <div class="hint">Tip: You can also right-click a duty station link on unjobs.org to save it.</div>
+    <div class="hint">Go to <b>Duty Stations</b> on unjobs.org and click "+ Save" next to any station, or visit a duty station page and save it from there.</div>
+  </div>
+
+  <div class="section">
+    <button class="search-btn" id="searchBtn" disabled>Search Saved Stations</button>
+    <div class="search-summary" id="searchSummary"></div>
   </div>
 
   <script src="popup.js"></script>
