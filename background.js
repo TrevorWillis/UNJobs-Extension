@@ -105,26 +105,22 @@ function parseJobsFromHTML(html, dutyStationName) {
 // ── Phase 2: Fetch individual vacancy pages to extract grades ──
 
 function extractGradeFromVacancyHTML(html) {
-  // Method 1: Structured "Grade:" field in the list-group
-  // Pattern: <li ...>Grade:...</li> containing <a href="/grades/p-4">P-4</a>
-  const gradeFieldMatch = html.match(/>\s*Grade:\s*<[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
-  if (gradeFieldMatch) {
-    return [gradeFieldMatch[1].trim()];
+  // Method 1: Structured "Grade:" field — find "Grade:" then the first <a> within 200 chars
+  const gradeIdx = html.indexOf('Grade:');
+  if (gradeIdx >= 0) {
+    const nearbyHtml = html.substring(gradeIdx, gradeIdx + 200);
+    const anchorMatch = nearbyHtml.match(/<a[^>]*>([^<]+)<\/a>/);
+    if (anchorMatch) {
+      return [anchorMatch[1].trim()];
+    }
   }
 
-  // Method 2: Detect from the vacancy title + first chunk of body text
-  // The title is in an <h2> or <h3> and the text follows
+  // Method 2: Detect grade patterns from the page title and body text
   const titleMatch = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
   const titleText = titleMatch ? stripHtml(titleMatch[1]) : '';
-
-  // Get the list-group metadata section
-  const listGroupMatch = html.match(/<ul[^>]*class="list-group"[^>]*>([\s\S]*?)<\/ul>/i);
-  const metaText = listGroupMatch ? stripHtml(listGroupMatch[1]) : '';
-
-  // Get first ~3000 chars of body text for grade detection
   const bodyText = stripHtml(html.substring(0, 8000));
 
-  return detectGrades(titleText + ' ' + metaText + ' ' + bodyText);
+  return detectGrades(titleText + ' ' + bodyText);
 }
 
 async function fetchVacancyGrade(url) {
