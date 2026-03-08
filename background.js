@@ -60,22 +60,35 @@ function parseJobsFromHTML(html, dutyStationName) {
   //   </div>
   // But the .job div is sometimes wrapped in an org div.
 
-  // Strategy: find all <a class="jtitle" elements and extract data around them
-  const jtitleRegex = /<a\s+class="jtitle"\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Strategy: find all <a ... class="jtitle" ... href="..."> elements
+  // Attributes can appear in any order (style, class, href)
+  const jtitleRegex = /<a\s[^>]*class="jtitle"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Also match when href comes before class
+  const jtitleRegex2 = /<a\s[^>]*href="([^"]*)"[^>]*class="jtitle"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Collect all matches from both regex patterns
+  const matches = [];
   let match;
-
   while ((match = jtitleRegex.exec(html)) !== null) {
-    const href = match[1];
-    const title = stripHtml(match[2]);
+    matches.push({ href: match[1], titleHtml: match[2], index: match.index, length: match[0].length });
+  }
+  while ((match = jtitleRegex2.exec(html)) !== null) {
+    // Avoid duplicates
+    if (!matches.some(m => m.index === match.index)) {
+      matches.push({ href: match[1], titleHtml: match[2], index: match.index, length: match[0].length });
+    }
+  }
+
+  for (const m of matches) {
+    const href = m.href;
+    const title = stripHtml(m.titleHtml);
     const url = href.startsWith('http') ? href : 'https://unjobs.org' + href;
 
-    // Get surrounding context (up to 2000 chars after the link) for org, grade, closing date
-    const afterLink = html.substring(match.index, match.index + 3000);
+    // Get surrounding context for org, grade, closing date
+    const afterLink = html.substring(m.index, m.index + 3000);
     const fullText = stripHtml(afterLink);
 
-    // Extract org: look for text before the jtitle link in the parent div
-    // The org is typically in the parent .job div's wrapper, before "Updated:"
-    const beforeLink = html.substring(Math.max(0, match.index - 500), match.index);
+    // Extract org from text before the link
+    const beforeLink = html.substring(Math.max(0, m.index - 500), m.index);
     let org = '';
     // Org text is usually right before the <a class="jtitle"> in the parent container
     // Pattern: org name appears in text, often followed by "Updated:"
