@@ -24,6 +24,14 @@
     { grade: 'Consultant', patterns: [/\bConsultan(?:t|cy)\b/i, /\bIndividual\s*Contractor\b/i] }
   ];
 
+  const MONTH_NAMES = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+  };
+
+  // Store last results for CSV export and keyword filtering
+  let lastResults = null;
+
   function detectGrades(text) {
     const found = [];
     for (const { grade, patterns } of GRADE_PATTERNS) {
@@ -37,13 +45,54 @@
     return found;
   }
 
+  function parseClosingDateText(text) {
+    if (!text) return null;
+    const m = text.match(/(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
+    if (!m) return null;
+    const day = parseInt(m[1]);
+    const month = MONTH_NAMES[m[2].toLowerCase()];
+    const year = parseInt(m[3]);
+    if (month === undefined) return null;
+    return new Date(year, month, day).toISOString().split('T')[0];
+  }
+
+  function closingDateBadge(isoDate) {
+    if (!isoDate) return '';
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    // Parse as local date (not UTC) to match the local "now"
+    const parts = isoDate.split('-');
+    const closing = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    const diffMs = closing - now;
+    const daysLeft = Math.ceil(diffMs / 86400000);
+
+    let cls, text;
+    if (daysLeft < 0) {
+      cls = 'unjobs-closing-expired';
+      text = 'Expired';
+    } else if (daysLeft === 0) {
+      cls = 'unjobs-closing-red';
+      text = 'Today!';
+    } else if (daysLeft <= 3) {
+      cls = 'unjobs-closing-red';
+      text = `${daysLeft}d left`;
+    } else if (daysLeft <= 7) {
+      cls = 'unjobs-closing-amber';
+      text = `${daysLeft}d left`;
+    } else {
+      cls = 'unjobs-closing-green';
+      text = `${daysLeft}d left`;
+    }
+    return `<span class="unjobs-closing-badge ${cls}">${text}</span>`;
+  }
+
   // ── Inline page filtering (badges on current page) ──
 
   function applyInlineFilters(settings) {
     const jobs = document.querySelectorAll('.job');
     if (jobs.length === 0) return;
 
-    const { enabled, filterMode, selectedGrades, dutyStations } = settings;
+    const { enabled, filterMode, selectedGrades } = settings;
 
     for (const job of jobs) {
       const text = job.textContent;
@@ -68,6 +117,24 @@
         if (titleLink) titleLink.after(container);
       }
 
+      // Add closing date countdown badges inline
+      job.querySelectorAll('.unjobs-closing-badge').forEach(b => b.remove());
+      const closingText = text.match(/Closing date:\s*[^,]+,\s*(\d{1,2}\s+\w+\s+\d{4})/);
+      if (closingText) {
+        const iso = parseClosingDateText(closingText[1]);
+        if (iso) {
+          const badgeHtml = closingDateBadge(iso);
+          if (badgeHtml) {
+            const temp = document.createElement('span');
+            temp.innerHTML = badgeHtml;
+            const titleLink = job.querySelector('a.jtitle');
+            const gradeContainer = job.querySelector('.unjobs-grade-badge-container');
+            const insertAfter = gradeContainer || titleLink;
+            if (insertAfter) insertAfter.after(temp.firstChild);
+          }
+        }
+      }
+
       // Apply highlight/hide
       job.classList.remove('unjobs-hidden', 'unjobs-highlight', 'unjobs-dimmed');
       if (!enabled || selectedGrades.length === 0) continue;
@@ -84,7 +151,6 @@
   // ── "Save this duty station" buttons on duty station links ──
 
   function addSaveButtons(settings) {
-    // On the duty stations index page, add save buttons next to each station
     const isDutyStationsPage = window.location.pathname === '/duty_stations' ||
                                 window.location.pathname === '/duty_stations/';
     if (!isDutyStationsPage) return;
@@ -107,12 +173,10 @@
         e.stopPropagation();
         const s = await loadSettings();
         if (s.dutyStations.some(d => d.url === url)) {
-          // Remove
           s.dutyStations = s.dutyStations.filter(d => d.url !== url);
           btn.textContent = '+ Save';
           btn.classList.remove('saved');
         } else {
-          // Add
           s.dutyStations.push({ name, url });
           btn.textContent = '\u2713 Saved';
           btn.classList.add('saved');
@@ -123,7 +187,6 @@
     }
   }
 
-  // Also add a save button on individual duty station pages
   function addSaveButtonOnDutyStationPage(settings) {
     const path = window.location.pathname;
     const isDsPage = path.match(/^\/(duty_stations|field_locations)\/[^/]+$/);
@@ -171,9 +234,13 @@
       <div class="unjobs-panel-header">
         <span class="unjobs-panel-title">UNJobs Search Results</span>
         <div class="unjobs-panel-controls">
+          <button id="unjobs-panel-export" title="Export CSV">CSV</button>
           <button id="unjobs-panel-minimize" title="Minimize">\u2013</button>
           <button id="unjobs-panel-close" title="Close">\u00d7</button>
         </div>
+      </div>
+      <div class="unjobs-panel-search">
+        <input type="text" id="unjobs-search-input" placeholder="Filter results by keyword..." />
       </div>
       <div id="unjobs-panel-status" class="unjobs-panel-status">Ready</div>
       <div id="unjobs-panel-body" class="unjobs-panel-body"></div>
@@ -189,7 +256,113 @@
       btn.textContent = panel.classList.contains('minimized') ? '+' : '\u2013';
     });
 
+    // Keyword filter
+    document.getElementById('unjobs-search-input').addEventListener('input', (e) => {
+      filterResultsByKeyword(e.target.value);
+    });
+
+    // CSV export
+    document.getElementById('unjobs-panel-export').addEventListener('click', exportToCSV);
+
     return panel;
+  }
+
+  function filterResultsByKeyword(query) {
+    const panel = document.getElementById('unjobs-results-panel');
+    if (!panel) return;
+
+    const q = query.toLowerCase().trim();
+    const items = panel.querySelectorAll('.unjobs-result-item');
+    let visible = 0;
+    let total = items.length;
+
+    for (const item of items) {
+      const title = (item.querySelector('.unjobs-result-title') || {}).textContent || '';
+      const org = (item.querySelector('.unjobs-result-org') || {}).textContent || '';
+      const grades = Array.from(item.querySelectorAll('.unjobs-grade-badge')).map(b => b.textContent).join(' ');
+      const text = (title + ' ' + org + ' ' + grades).toLowerCase();
+
+      if (!q || text.includes(q)) {
+        item.style.display = '';
+        visible++;
+      } else {
+        item.style.display = 'none';
+      }
+    }
+
+    // Update station group headers
+    const groups = panel.querySelectorAll('.unjobs-station-group');
+    for (const group of groups) {
+      const groupItems = group.querySelectorAll('.unjobs-result-item');
+      const groupVisible = Array.from(groupItems).filter(i => i.style.display !== 'none').length;
+      const header = group.querySelector('.unjobs-station-header');
+      if (header) {
+        const countSpan = header.querySelector('.unjobs-station-count');
+        if (countSpan) {
+          countSpan.textContent = q ? `(${groupVisible}/${groupItems.length})` : `(${groupItems.length})`;
+        }
+      }
+      group.style.display = groupVisible === 0 ? 'none' : '';
+    }
+
+    // Update status with filter info
+    const status = panel.querySelector('#unjobs-panel-status');
+    if (status && q) {
+      const origText = status.dataset.originalText || status.textContent;
+      status.dataset.originalText = origText;
+      status.textContent = `Showing ${visible} of ${total} — ${origText}`;
+    } else if (status && status.dataset.originalText) {
+      status.textContent = status.dataset.originalText;
+      delete status.dataset.originalText;
+    }
+  }
+
+  function exportToCSV() {
+    if (!lastResults || lastResults.length === 0) return;
+
+    // Respect keyword filter
+    const panel = document.getElementById('unjobs-results-panel');
+    const searchInput = panel ? panel.querySelector('#unjobs-search-input') : null;
+    const q = searchInput ? searchInput.value.toLowerCase().trim() : '';
+
+    let jobs = lastResults;
+    if (q) {
+      jobs = jobs.filter(j => {
+        const text = (j.title + ' ' + j.org + ' ' + j.grades.join(' ')).toLowerCase();
+        return text.includes(q);
+      });
+    }
+
+    const csvEscape = (val) => {
+      const s = String(val || '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    const rows = [['Title', 'Organization', 'Grade', 'Duty Station', 'Closing Date', 'URL'].join(',')];
+    for (const job of jobs) {
+      rows.push([
+        csvEscape(job.title),
+        csvEscape(job.org),
+        csvEscape(job.grades.join('; ')),
+        csvEscape(job.dutyStation),
+        csvEscape(job.closingDateISO || job.closingDate || ''),
+        csvEscape(job.url)
+      ].join(','));
+    }
+
+    const csv = rows.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `unjobs-results-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function showProgress(text) {
@@ -197,6 +370,7 @@
     const status = panel.querySelector('#unjobs-panel-status');
     status.textContent = text;
     status.classList.add('loading');
+    delete status.dataset.originalText;
   }
 
   function showResults(data) {
@@ -206,7 +380,16 @@
     status.classList.remove('loading');
 
     const { jobs, totalScanned, stationsScanned } = data;
-    status.textContent = `Found ${jobs.length} matching jobs (scanned ${totalScanned} across ${stationsScanned} station${stationsScanned > 1 ? 's' : ''})`;
+    lastResults = jobs;
+
+    const newCount = jobs.filter(j => j.isNew).length;
+    const statusText = `Found ${jobs.length} matching jobs (scanned ${totalScanned} across ${stationsScanned} station${stationsScanned > 1 ? 's' : ''})${newCount > 0 ? ` — ${newCount} new` : ''}`;
+    status.textContent = statusText;
+    delete status.dataset.originalText;
+
+    // Clear keyword filter
+    const searchInput = panel.querySelector('#unjobs-search-input');
+    if (searchInput) searchInput.value = '';
 
     if (jobs.length === 0) {
       body.innerHTML = '<div class="unjobs-no-results">No jobs match your filters. Try selecting more grades or adding more duty stations.</div>';
@@ -233,13 +416,17 @@
           return `<span class="unjobs-grade-badge ${cls}">${escapeHtml(g)}</span>`;
         }).join(' ');
 
+        const closingBadge = closingDateBadge(job.closingDateISO);
+        const newBadge = job.isNew ? '<span class="unjobs-new-badge">NEW</span>' : '';
+
         html += `
           <div class="unjobs-result-item">
-            <a href="${escapeHtml(job.url)}" target="_blank" class="unjobs-result-title">${escapeHtml(job.title)}</a>
+            <a href="${escapeHtml(job.url)}" target="_blank" class="unjobs-result-title">${newBadge}${escapeHtml(job.title)}</a>
             <div class="unjobs-result-meta">
               ${gradeHtml}
+              ${closingBadge}
               ${job.org ? `<span class="unjobs-result-org">${escapeHtml(job.org)}</span>` : ''}
-              ${job.closingDate ? `<span class="unjobs-result-closing">${escapeHtml(job.closingDate)}</span>` : ''}
+              <a href="${escapeHtml(job.url)}" target="_blank" class="unjobs-result-apply">View & Apply</a>
             </div>
           </div>`;
       }
@@ -281,7 +468,7 @@
       type: 'fetchJobs',
       dutyStations: settings.dutyStations,
       selectedGrades: settings.selectedGrades
-    });
+    }, () => { if (chrome.runtime.lastError) { /* ignore */ } });
   }
 
   // ── Listen for messages from background ──

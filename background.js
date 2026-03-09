@@ -9,6 +9,12 @@
 
 const CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 3 months
 const CACHE_KEY = 'gradeCache';
+const SEEN_KEY = 'seenJobUrls';
+
+const MONTH_NAMES = {
+  january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+  july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+};
 
 const GRADE_PATTERNS = [
   { grade: 'P-1', patterns: [/\bP[\s-]?1\b/i] },
@@ -54,6 +60,19 @@ function stripHtml(html) {
     .replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Parse "Closing date: Thursday, 17 March 2026" or "17 March 2026" into ISO date string
+function parseClosingDateText(text) {
+  if (!text) return null;
+  const m = text.match(/(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
+  if (!m) return null;
+  const day = parseInt(m[1]);
+  const month = MONTH_NAMES[m[2].toLowerCase()];
+  const year = parseInt(m[3]);
+  if (month === undefined) return null;
+  const d = new Date(year, month, day);
+  return d.toISOString().split('T')[0];
+}
+
 // ── Grade cache ──
 
 async function loadCache() {
@@ -82,6 +101,22 @@ function pruneCache(cache) {
   return pruned;
 }
 
+// ── Seen jobs (for "NEW" badges) ──
+
+async function loadSeenUrls() {
+  return new Promise(resolve => {
+    chrome.storage.local.get({ [SEEN_KEY]: [] }, result => {
+      resolve(new Set(result[SEEN_KEY] || []));
+    });
+  });
+}
+
+async function saveSeenUrls(urlSet) {
+  return new Promise(resolve => {
+    chrome.storage.local.set({ [SEEN_KEY]: [...urlSet] }, resolve);
+  });
+}
+
 // ── Phase 1: Parse job listings from a duty station listing page ──
 
 function parseJobsFromHTML(html, dutyStationName) {
@@ -107,36 +142,55 @@ function parseJobsFromHTML(html, dutyStationName) {
     const afterLink = html.substring(m.index, m.index + 2000);
     const closingMatch = afterLink.match(/Closing date:\s*([^<]+)/);
     const closingDate = closingMatch ? 'Closing date: ' + closingMatch[1].trim() : '';
+    const closingDateISO = closingDate ? parseClosingDateText(closingDate) : null;
 
     const beforeLink = html.substring(Math.max(0, m.index - 500), m.index);
     let org = '';
     const orgMatch = beforeLink.match(/(?:class="job"[^>]*>)([^<]+)/);
     if (orgMatch) org = orgMatch[1].trim();
 
-    jobs.push({ title, url, org, grades: [], closingDate, dutyStation: dutyStationName });
+    jobs.push({ title, url, org, grades: [], closingDate, closingDateISO, dutyStation: dutyStationName });
   }
 
   return jobs;
 }
 
-// ── Phase 2: Extract grade from a vacancy detail page ──
+// ── Phase 2: Extract grade + apply link from a vacancy detail page ──
 
-function extractGradeFromVacancyHTML(html) {
+function extractVacancyDetails(html) {
+  // Grade extraction
+  let grades = [];
   const gradeIdx = html.indexOf('Grade:');
   if (gradeIdx >= 0) {
     const nearbyHtml = html.substring(gradeIdx, gradeIdx + 200);
     const anchorMatch = nearbyHtml.match(/<a[^>]*>([^<]+)<\/a>/);
     if (anchorMatch) {
-      return [anchorMatch[1].trim()];
+      grades = [anchorMatch[1].trim()];
     }
   }
+  if (grades.length === 0) {
+    const titleMatch = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
+    const titleText = titleMatch ? stripHtml(titleMatch[1]) : '';
+    const bodyText = stripHtml(html.substring(0, 8000));
+    grades = detectGrades(titleText + ' ' + bodyText);
+  }
 
-  const titleMatch = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
-  const titleText = titleMatch ? stripHtml(titleMatch[1]) : '';
-  const bodyText = stripHtml(html.substring(0, 8000));
+  // Apply URL: vacancy page URL itself (it has the "More Information" button)
+  // We can't resolve the POST form from the service worker due to CORS,
+  // so we link directly to the unjobs vacancy page.
 
-  return detectGrades(titleText + ' ' + bodyText);
+  // Closing date from vacancy page (more reliable than listing page)
+  let closingDateISO = null;
+  const dateVarMatch = html.match(/fNELMfVpi\s*=\s*(\d+)[\s\S]*?fNELMfVpd\s*=\s*(\d+)/);
+  if (dateVarMatch) {
+    const ts = parseInt(dateVarMatch[1]) + parseInt(dateVarMatch[2]);
+    const d = new Date(ts);
+    closingDateISO = d.toISOString().split('T')[0];
+  }
+
+  return { grades, closingDateISO };
 }
+
 
 // ── Listing page helpers ──
 
@@ -183,44 +237,12 @@ async function fetchDutyStation(station, sendProgress) {
   return jobs;
 }
 
-// ── Message handling ──
+// ── Core search logic (shared by manual + auto-check) ──
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'fetchJobs') {
-    handleFetchJobs(msg, sender);
-    return false;
-  }
-  if (msg.type === 'clearCache') {
-    saveCache({}).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  if (msg.type === 'getCacheStats') {
-    loadCache().then(cache => {
-      const count = Object.keys(cache).length;
-      sendResponse({ count });
-    });
-    return true;
-  }
-});
-
-async function handleFetchJobs(msg, sender) {
-  let tabId = sender.tab ? sender.tab.id : null;
-  if (!tabId) {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const unjobsTab = tabs.find(t => t.url && t.url.includes('unjobs.org'));
-    if (unjobsTab) tabId = unjobsTab.id;
-  }
-
-  const { dutyStations, selectedGrades } = msg;
-
-  function sendProgress(text) {
-    if (tabId) {
-      chrome.tabs.sendMessage(tabId, { type: 'fetchProgress', text }).catch(() => {});
-    }
-  }
-
+async function runSearch(dutyStations, selectedGrades, sendProgress) {
   // Load and prune cache
   let cache = pruneCache(await loadCache());
+  const previouslySeen = await loadSeenUrls();
 
   // Phase 1: Collect all job listings
   sendProgress('Phase 1: Collecting job listings...');
@@ -243,6 +265,11 @@ async function handleFetchJobs(msg, sender) {
     return true;
   });
 
+  // Mark new jobs
+  for (const job of allJobs) {
+    job.isNew = !previouslySeen.has(job.url);
+  }
+
   // Separate cached vs uncached jobs
   const uncached = [];
   let cacheHits = 0;
@@ -250,6 +277,7 @@ async function handleFetchJobs(msg, sender) {
     const cached = cache[job.url];
     if (cached) {
       job.grades = cached.grades;
+      if (cached.closingDateISO) job.closingDateISO = cached.closingDateISO;
       cacheHits++;
     } else {
       uncached.push(job);
@@ -271,29 +299,35 @@ async function handleFetchJobs(msg, sender) {
           const resp = await fetch(job.url);
           if (!resp.ok) {
             gradeErrors++;
-            return [];
+            return { grades: [], closingDateISO: null };
           }
           const html = await resp.text();
-          return extractGradeFromVacancyHTML(html);
+          return extractVacancyDetails(html);
         } catch (e) {
           gradeErrors++;
-          return [];
+          return { grades: [], closingDateISO: null };
         }
       })
     );
     for (let j = 0; j < batch.length; j++) {
       const result = results[j];
-      const grades = result.status === 'fulfilled' ? result.value : [];
-      batch[j].grades = grades;
+      const details = result.status === 'fulfilled' ? result.value : { grades: [], closingDateISO: null };
+      batch[j].grades = details.grades;
+      if (details.closingDateISO) batch[j].closingDateISO = details.closingDateISO;
       // Store in cache
-      cache[batch[j].url] = { grades, ts: Date.now() };
+      cache[batch[j].url] = { grades: details.grades, closingDateISO: details.closingDateISO, ts: Date.now() };
     }
     completed += batch.length;
     sendProgress(`Checking grades: ${completed}/${uncached.length} new vacancies (${gradeErrors} errors)...`);
   }
 
-  // Save updated cache
+  // Save cache before resolving apply URLs (grades are the important part)
   await saveCache(cache);
+
+  // Update seen URLs (union of previous + current)
+  const allUrls = new Set(previouslySeen);
+  for (const job of allJobs) allUrls.add(job.url);
+  await saveSeenUrls(allUrls);
 
   // Filter by selected grades
   let filtered = allJobs;
@@ -305,13 +339,76 @@ async function handleFetchJobs(msg, sender) {
 
   // Sort by closing date (soonest first), jobs without date at the end
   filtered.sort((a, b) => {
-    if (!a.closingDate && !b.closingDate) return 0;
-    if (!a.closingDate) return 1;
-    if (!b.closingDate) return -1;
-    return a.closingDate.localeCompare(b.closingDate);
+    const aDate = a.closingDateISO || '';
+    const bDate = b.closingDateISO || '';
+    if (!aDate && !bDate) return 0;
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+    return aDate.localeCompare(bDate);
   });
 
-  sendProgress(`Done! ${filtered.length} of ${allJobs.length} match (${cacheHits} from cache).`);
+  const newCount = filtered.filter(j => j.isNew).length;
+  sendProgress(`Done! ${filtered.length} of ${allJobs.length} match (${newCount} new, ${cacheHits} from cache).`);
+
+  return { filtered, allJobs, cacheHits, newCount };
+}
+
+// ── Message handling ──
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'fetchJobs') {
+    handleFetchJobs(msg, sender);
+    return false;
+  }
+  if (msg.type === 'clearCache') {
+    saveCache({}).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.type === 'getCacheStats') {
+    loadCache().then(cache => {
+      const count = Object.keys(cache).length;
+      sendResponse({ count });
+    });
+    return true;
+  }
+  if (msg.type === 'updateAutoCheck') {
+    chrome.alarms.clear('autoCheck').then(() => {
+      if (msg.interval === '12h') {
+        chrome.alarms.create('autoCheck', { periodInMinutes: 720 });
+      } else if (msg.interval === 'daily') {
+        chrome.alarms.create('autoCheck', { periodInMinutes: 1440 });
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  if (msg.type === 'clearBadge') {
+    chrome.action.setBadgeText({ text: '' });
+    sendResponse({ ok: true });
+    return false;
+  }
+});
+
+async function handleFetchJobs(msg, sender) {
+  let tabId = sender.tab ? sender.tab.id : null;
+  if (!tabId) {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const unjobsTab = tabs.find(t => t.url && t.url.includes('unjobs.org'));
+    if (unjobsTab) tabId = unjobsTab.id;
+  }
+
+  const { dutyStations, selectedGrades } = msg;
+
+  function sendProgress(text) {
+    if (tabId) {
+      chrome.tabs.sendMessage(tabId, { type: 'fetchProgress', text }).catch(() => {});
+    }
+  }
+
+  // Clear badge when manual search starts
+  chrome.action.setBadgeText({ text: '' });
+
+  const { filtered, allJobs, cacheHits } = await runSearch(dutyStations, selectedGrades, sendProgress);
 
   if (tabId) {
     chrome.tabs.sendMessage(tabId, {
@@ -322,3 +419,42 @@ async function handleFetchJobs(msg, sender) {
     }).catch(() => {});
   }
 }
+
+// ── Auto-check alarm ──
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'autoCheck') return;
+
+  // Load settings
+  const settings = await new Promise(resolve => {
+    chrome.storage.sync.get({
+      dutyStations: [],
+      selectedGrades: [],
+      autoCheckInterval: 'off'
+    }, resolve);
+  });
+
+  if (settings.dutyStations.length === 0 || settings.autoCheckInterval === 'off') return;
+
+  const noop = () => {};
+  const { filtered } = await runSearch(settings.dutyStations, settings.selectedGrades, noop);
+
+  const newCount = filtered.filter(j => j.isNew).length;
+  if (newCount > 0) {
+    chrome.action.setBadgeText({ text: String(newCount) });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+  }
+});
+
+// Restore alarm on install/update
+chrome.runtime.onInstalled.addListener(async () => {
+  const settings = await new Promise(resolve => {
+    chrome.storage.sync.get({ autoCheckInterval: 'off' }, resolve);
+  });
+  await chrome.alarms.clear('autoCheck');
+  if (settings.autoCheckInterval === '12h') {
+    chrome.alarms.create('autoCheck', { periodInMinutes: 720 });
+  } else if (settings.autoCheckInterval === 'daily') {
+    chrome.alarms.create('autoCheck', { periodInMinutes: 1440 });
+  }
+});

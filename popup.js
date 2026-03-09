@@ -11,7 +11,8 @@ const DEFAULT_SETTINGS = {
   enabled: true,
   filterMode: 'highlight',
   selectedGrades: [],
-  dutyStations: []  // [{name, url}]
+  dutyStations: [],  // [{name, url}]
+  autoCheckInterval: 'off'
 };
 
 function loadSettings() {
@@ -178,7 +179,7 @@ async function init() {
           type: 'fetchJobs',
           dutyStations: s.dutyStations,
           selectedGrades: s.selectedGrades
-        });
+        }, () => { if (chrome.runtime.lastError) { /* ignore */ } });
         window.close();
       } else {
         chrome.tabs.create({ url: 'https://unjobs.org' }, (tab) => {
@@ -187,7 +188,7 @@ async function init() {
               type: 'fetchJobs',
               dutyStations: s.dutyStations,
               selectedGrades: s.selectedGrades
-            });
+            }, () => { if (chrome.runtime.lastError) { /* ignore */ } });
           }, 2000);
           window.close();
         });
@@ -195,11 +196,37 @@ async function init() {
     });
   });
 
+  // Auto-check
+  const autoCheckBtns = document.querySelectorAll('#autoCheckMode button');
+  function setAutoCheck(interval) {
+    for (const b of autoCheckBtns) {
+      b.classList.toggle('active', b.dataset.interval === interval);
+    }
+  }
+  setAutoCheck(settings.autoCheckInterval || 'off');
+
+  for (const btn of autoCheckBtns) {
+    btn.addEventListener('click', async () => {
+      const interval = btn.dataset.interval;
+      setAutoCheck(interval);
+      await saveSettings({ autoCheckInterval: interval });
+      chrome.runtime.sendMessage({ type: 'updateAutoCheck', interval }, () => {
+        if (chrome.runtime.lastError) { /* ignore */ }
+      });
+    });
+  }
+
+  // Clear badge when popup opens
+  chrome.runtime.sendMessage({ type: 'clearBadge' }, () => {
+    if (chrome.runtime.lastError) { /* ignore */ }
+  });
+
   // Cache stats
   updateCacheInfo();
 
   document.getElementById('clearCache').addEventListener('click', async () => {
     chrome.runtime.sendMessage({ type: 'clearCache' }, () => {
+      if (chrome.runtime.lastError) { /* ignore */ }
       updateCacheInfo();
     });
   });
@@ -207,6 +234,7 @@ async function init() {
 
 function updateCacheInfo() {
   chrome.runtime.sendMessage({ type: 'getCacheStats' }, (resp) => {
+    if (chrome.runtime.lastError) return;
     const el = document.getElementById('cacheInfo');
     if (resp && resp.count > 0) {
       el.textContent = `Cache: ${resp.count} vacancies stored`;

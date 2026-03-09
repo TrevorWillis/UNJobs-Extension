@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "UNJobs Enhanced Filter",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Filter UN jobs by grade level and saved duty stations on unjobs.org",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": ["https://unjobs.org/*"],
   "background": {
     "service_worker": "background.js"
